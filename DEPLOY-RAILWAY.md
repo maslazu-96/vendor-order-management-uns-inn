@@ -1,3 +1,7 @@
+# Railway deployment — FLAT GitHub version
+
+Versi ini sengaja dibuat tanpa folder `public/` dan `src/`, sehingga semua file dapat di-upload satu per satu melalui tombol **Add file → Upload files** di GitHub Web.
+
 # Deploy Online — Railway
 
 Versi 1.2 disiapkan agar aplikasi bisa online tanpa komputer kantor harus menyala.

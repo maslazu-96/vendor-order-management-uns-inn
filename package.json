@@ -4,9 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --watch src/server.js",
-    "start": "node src/server.js",
-    "test": "node src/smoke-test.js"
+    "dev": "node --watch server.js",
+    "start": "node server.js",
+    "test": "node smoke-test.js"
   },
   "engines": {"node": ">=22.5.0"}
 }
