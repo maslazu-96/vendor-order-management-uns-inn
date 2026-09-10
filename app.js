@@ -35,6 +35,58 @@ function toast(msg) {
   window.__tt = setTimeout(() => el.style.display = 'none', 2600);
 }
 
+
+let idleLogoutTimer = null;
+let maxLogoutTimer = null;
+let lastSessionPingAt = 0;
+let autoLogoutConfigured = false;
+
+function logoutFor(reason) {
+  window.location.assign(`/logout?reason=${encodeURIComponent(reason)}`);
+}
+
+function scheduleIdleLogout() {
+  if (!state.meta.authEnabled) return;
+  clearTimeout(idleLogoutTimer);
+  const idleMs = Number(state.meta.idleTimeoutMs || 30 * 60 * 1000);
+  idleLogoutTimer = setTimeout(() => logoutFor('idle'), idleMs);
+}
+
+async function pingSession() {
+  const now = Date.now();
+  if (!state.meta.authEnabled || now - lastSessionPingAt < 5 * 60 * 1000) return;
+  lastSessionPingAt = now;
+  try {
+    const r = await fetch('/api/session/ping', {method:'POST', cache:'no-store'});
+    if (r.status === 401) window.location.assign('/login?reason=expired');
+  } catch {
+    // Gangguan jaringan tidak langsung mengeluarkan user; server tetap menentukan validitas sesi.
+  }
+}
+
+function recordUserActivity() {
+  if (!state.meta.authEnabled) return;
+  scheduleIdleLogout();
+  void pingSession();
+}
+
+function setupAutoLogout() {
+  if (!state.meta.authEnabled || autoLogoutConfigured) return;
+  autoLogoutConfigured = true;
+  scheduleIdleLogout();
+
+  const maxMs = Number(state.meta.maxSessionMs || 8 * 60 * 60 * 1000);
+  clearTimeout(maxLogoutTimer);
+  maxLogoutTimer = setTimeout(() => logoutFor('max'), maxMs);
+
+  ['pointerdown','keydown','touchstart','wheel'].forEach(eventName => {
+    window.addEventListener(eventName, recordUserActivity, {passive:true});
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) recordUserActivity();
+  });
+}
+
 async function api(path, opt={}) {
   const r = await fetch(path, {
     headers: {'Content-Type':'application/json', ...(opt.headers || {})},
@@ -42,6 +94,10 @@ async function api(path, opt={}) {
     ...opt
   });
   if (!r.ok) {
+    if (r.status === 401) {
+      window.location.assign('/login?reason=expired');
+      throw new Error('Sesi login sudah berakhir.');
+    }
     let data = {};
     try { data = await r.json(); } catch {}
     const err = new Error(data.error || `HTTP ${r.status}`);
@@ -56,6 +112,10 @@ async function downloadFile(url, fallbackName) {
   try {
     const r = await fetch(url, {cache:'no-store'});
     if (!r.ok) {
+      if (r.status === 401) {
+        window.location.assign('/login?reason=expired');
+        return;
+      }
       let data = {};
       try { data = await r.json(); } catch {}
       throw new Error(data.error || `Download gagal (HTTP ${r.status})`);
@@ -87,6 +147,7 @@ async function bootstrap() {
   ]);
   const logoutBtn = document.querySelector('#logoutBtn');
   if (logoutBtn) logoutBtn.hidden = !state.meta.authEnabled;
+  setupAutoLogout();
   route(location.hash.slice(1) || 'dashboard');
 }
 

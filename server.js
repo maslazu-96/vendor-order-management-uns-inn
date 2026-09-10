@@ -17,6 +17,10 @@ const APP_USERNAME = process.env.APP_USERNAME || '';
 const APP_PASSWORD = process.env.APP_PASSWORD || '';
 const SESSION_SECRET = process.env.SESSION_SECRET || APP_PASSWORD || '';
 const AUTH_ENABLED = Boolean(APP_PASSWORD);
+const IDLE_TIMEOUT_MINUTES = Math.max(1, Number(process.env.IDLE_TIMEOUT_MINUTES || 30));
+const MAX_SESSION_HOURS = Math.max(1, Number(process.env.MAX_SESSION_HOURS || 8));
+const IDLE_TIMEOUT_MS = IDLE_TIMEOUT_MINUTES * 60 * 1000;
+const MAX_SESSION_MS = MAX_SESSION_HOURS * 60 * 60 * 1000;
 
 function parseCookies(req) {
   const out = {};
@@ -27,23 +31,49 @@ function parseCookies(req) {
   return out;
 }
 
-function signSession(exp) {
-  const payload = `${exp}`;
+function signSession(iat, idleExp, maxExp) {
+  const payload = `${iat}.${idleExp}.${maxExp}`;
   const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
   return `${payload}.${sig}`;
 }
 
-function validSession(req) {
-  if (!AUTH_ENABLED) return true;
+function readSession(req) {
+  if (!AUTH_ENABLED) return {iat:Date.now(), idleExp:Infinity, maxExp:Infinity};
   const token = parseCookies(req).vom_session;
-  if (!token || !SESSION_SECRET) return false;
-  const [expText, sig=''] = token.split('.');
-  const exp = Number(expText);
-  if (!Number.isFinite(exp) || Date.now() > exp) return false;
-  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(expText).digest('hex');
+  if (!token || !SESSION_SECRET) return null;
+  const [iatText, idleText, maxText, sig=''] = token.split('.');
+  const iat = Number(iatText);
+  const idleExp = Number(idleText);
+  const maxExp = Number(maxText);
+  if (![iat,idleExp,maxExp].every(Number.isFinite)) return null;
+  const payload = `${iatText}.${idleText}.${maxText}`;
+  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
   try {
-    return sig.length === expected.length && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
-  } catch { return false; }
+    if (sig.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
+  } catch { return null; }
+  const now = Date.now();
+  if (now > idleExp || now > maxExp) return null;
+  return {iat,idleExp,maxExp};
+}
+
+function validSession(req) {
+  return Boolean(readSession(req));
+}
+
+function sessionCookie(req, session) {
+  const maxAge = Math.max(0, Math.floor((session.maxExp - Date.now()) / 1000));
+  return `vom_session=${encodeURIComponent(signSession(session.iat, session.idleExp, session.maxExp))}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secureCookie(req)?'; Secure':''}`;
+}
+
+function refreshSession(req, res, session) {
+  if (!AUTH_ENABLED || !session) return session;
+  const now = Date.now();
+  const refreshed = {
+    ...session,
+    idleExp: Math.min(now + IDLE_TIMEOUT_MS, session.maxExp)
+  };
+  res.setHeader('Set-Cookie', sessionCookie(req, refreshed));
+  return refreshed;
 }
 
 function loginPage(error='') {
@@ -180,7 +210,8 @@ async function api(req, res, url) {
   const method = req.method;
 
   if (p === '/api/health') return json(res, {ok:true, app:APP_NAME, db:activeDbPath});
-  if (p === '/api/meta') return json(res, {statuses:STATUSES, googleSheetsConfigured:!!getGoogleSheetsUrl(), appName:APP_NAME, authEnabled:AUTH_ENABLED});
+  if (p === '/api/meta') return json(res, {statuses:STATUSES, googleSheetsConfigured:!!getGoogleSheetsUrl(), appName:APP_NAME, authEnabled:AUTH_ENABLED, idleTimeoutMs:IDLE_TIMEOUT_MS, maxSessionMs:MAX_SESSION_MS, idleTimeoutMinutes:IDLE_TIMEOUT_MINUTES, maxSessionHours:MAX_SESSION_HOURS});
+  if (p === '/api/session/ping' && method === 'POST') return json(res, {ok:true, now:Date.now()});
 
   if (p === '/api/settings' && method === 'GET') {
     return json(res, {google_sheets_webhook_url:getGoogleSheetsUrl()});
@@ -464,28 +495,40 @@ const server = http.createServer(async (req,res) => {
 
     if (url.pathname === '/login' && req.method === 'GET') {
       if (validSession(req)) { res.writeHead(302,{Location:'/'}); return res.end(); }
-      return text(res, loginPage(), 200, 'text/html; charset=utf-8');
+      const reason = url.searchParams.get('reason');
+      const messages = {
+        idle:`Sesi berakhir karena tidak ada aktivitas selama ${IDLE_TIMEOUT_MINUTES} menit. Silakan masuk kembali.`,
+        max:`Sesi maksimum ${MAX_SESSION_HOURS} jam telah berakhir. Silakan masuk kembali.`,
+        expired:'Sesi login sudah berakhir. Silakan masuk kembali.'
+      };
+      return text(res, loginPage(messages[reason] || ''), 200, 'text/html; charset=utf-8');
     }
     if (url.pathname === '/login' && req.method === 'POST') {
       const b = await parseForm(req);
       const userOk = !APP_USERNAME || b.username === APP_USERNAME;
       const passOk = b.password === APP_PASSWORD;
       if (!userOk || !passOk) return text(res, loginPage('Username atau password salah.'), 401, 'text/html; charset=utf-8');
-      const exp = Date.now() + 7*24*60*60*1000;
-      const cookie = `vom_session=${encodeURIComponent(signSession(exp))}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7*24*60*60}${secureCookie(req)?'; Secure':''}`;
-      res.writeHead(302,{Location:'/', 'Set-Cookie':cookie}); return res.end();
+      const now = Date.now();
+      const session = {iat:now, idleExp:now + IDLE_TIMEOUT_MS, maxExp:now + MAX_SESSION_MS};
+      res.writeHead(302,{Location:'/', 'Set-Cookie':sessionCookie(req, session)}); return res.end();
     }
     if (url.pathname === '/logout') {
-      res.writeHead(302,{Location:'/login','Set-Cookie':`vom_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureCookie(req)?'; Secure':''}`}); return res.end();
+      const reason = url.searchParams.get('reason');
+      const target = ['idle','max','expired'].includes(reason) ? `/login?reason=${reason}` : '/login';
+      res.writeHead(302,{Location:target,'Set-Cookie':`vom_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureCookie(req)?'; Secure':''}`}); return res.end();
     }
 
     if (url.pathname === '/api/health') return await api(req,res,url);
-    if (!validSession(req)) {
+    const session = readSession(req);
+    if (!session) {
       if (url.pathname.startsWith('/api/')) return json(res,{error:'Unauthorized'},401);
-      res.writeHead(302,{Location:'/login'}); return res.end();
+      res.writeHead(302,{Location:'/login?reason=expired'}); return res.end();
     }
 
-    if (url.pathname.startsWith('/api/')) return await api(req,res,url);
+    if (url.pathname.startsWith('/api/')) {
+      refreshSession(req, res, session);
+      return await api(req,res,url);
+    }
     if (staticFile(res,url.pathname)) return;
     return staticFile(res,'/index.html') || text(res,'Not found',404);
   } catch (e) {
