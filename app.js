@@ -37,7 +37,6 @@ function toast(msg) {
 
 
 let idleLogoutTimer = null;
-let maxLogoutTimer = null;
 let lastSessionPingAt = 0;
 let autoLogoutConfigured = false;
 
@@ -74,10 +73,6 @@ function setupAutoLogout() {
   if (!state.meta.authEnabled || autoLogoutConfigured) return;
   autoLogoutConfigured = true;
   scheduleIdleLogout();
-
-  const maxMs = Number(state.meta.maxSessionMs || 8 * 60 * 60 * 1000);
-  clearTimeout(maxLogoutTimer);
-  maxLogoutTimer = setTimeout(() => logoutFor('max'), maxMs);
 
   ['pointerdown','keydown','touchstart','wheel'].forEach(eventName => {
     window.addEventListener(eventName, recordUserActivity, {passive:true});

@@ -17,10 +17,8 @@ const APP_USERNAME = process.env.APP_USERNAME || '';
 const APP_PASSWORD = process.env.APP_PASSWORD || '';
 const SESSION_SECRET = process.env.SESSION_SECRET || APP_PASSWORD || '';
 const AUTH_ENABLED = Boolean(APP_PASSWORD);
-const IDLE_TIMEOUT_MINUTES = Math.max(1, Number(process.env.IDLE_TIMEOUT_MINUTES || 30));
-const MAX_SESSION_HOURS = Math.max(1, Number(process.env.MAX_SESSION_HOURS || 8));
+const IDLE_TIMEOUT_MINUTES = Math.max(1, Number(process.env.IDLE_TIMEOUT_MINUTES || 60));
 const IDLE_TIMEOUT_MS = IDLE_TIMEOUT_MINUTES * 60 * 1000;
-const MAX_SESSION_MS = MAX_SESSION_HOURS * 60 * 60 * 1000;
 
 function parseCookies(req) {
   const out = {};
@@ -31,29 +29,28 @@ function parseCookies(req) {
   return out;
 }
 
-function signSession(iat, idleExp, maxExp) {
-  const payload = `${iat}.${idleExp}.${maxExp}`;
+function signSession(iat, idleExp) {
+  const payload = `${iat}.${idleExp}`;
   const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
   return `${payload}.${sig}`;
 }
 
 function readSession(req) {
-  if (!AUTH_ENABLED) return {iat:Date.now(), idleExp:Infinity, maxExp:Infinity};
+  if (!AUTH_ENABLED) return {iat:Date.now(), idleExp:Infinity};
   const token = parseCookies(req).vom_session;
   if (!token || !SESSION_SECRET) return null;
-  const [iatText, idleText, maxText, sig=''] = token.split('.');
+  const [iatText, idleText, sig=''] = token.split('.');
   const iat = Number(iatText);
   const idleExp = Number(idleText);
-  const maxExp = Number(maxText);
-  if (![iat,idleExp,maxExp].every(Number.isFinite)) return null;
-  const payload = `${iatText}.${idleText}.${maxText}`;
+  if (![iat,idleExp].every(Number.isFinite)) return null;
+  const payload = `${iatText}.${idleText}`;
   const expected = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
   try {
     if (sig.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
   } catch { return null; }
   const now = Date.now();
-  if (now > idleExp || now > maxExp) return null;
-  return {iat,idleExp,maxExp};
+  if (now > idleExp) return null;
+  return {iat,idleExp};
 }
 
 function validSession(req) {
@@ -61,8 +58,8 @@ function validSession(req) {
 }
 
 function sessionCookie(req, session) {
-  const maxAge = Math.max(0, Math.floor((session.maxExp - Date.now()) / 1000));
-  return `vom_session=${encodeURIComponent(signSession(session.iat, session.idleExp, session.maxExp))}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secureCookie(req)?'; Secure':''}`;
+  const maxAge = Math.max(0, Math.floor((session.idleExp - Date.now()) / 1000));
+  return `vom_session=${encodeURIComponent(signSession(session.iat, session.idleExp))}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secureCookie(req)?'; Secure':''}`;
 }
 
 function refreshSession(req, res, session) {
@@ -70,7 +67,7 @@ function refreshSession(req, res, session) {
   const now = Date.now();
   const refreshed = {
     ...session,
-    idleExp: Math.min(now + IDLE_TIMEOUT_MS, session.maxExp)
+    idleExp: now + IDLE_TIMEOUT_MS
   };
   res.setHeader('Set-Cookie', sessionCookie(req, refreshed));
   return refreshed;
@@ -210,7 +207,7 @@ async function api(req, res, url) {
   const method = req.method;
 
   if (p === '/api/health') return json(res, {ok:true, app:APP_NAME, db:activeDbPath});
-  if (p === '/api/meta') return json(res, {statuses:STATUSES, googleSheetsConfigured:!!getGoogleSheetsUrl(), appName:APP_NAME, authEnabled:AUTH_ENABLED, idleTimeoutMs:IDLE_TIMEOUT_MS, maxSessionMs:MAX_SESSION_MS, idleTimeoutMinutes:IDLE_TIMEOUT_MINUTES, maxSessionHours:MAX_SESSION_HOURS});
+  if (p === '/api/meta') return json(res, {statuses:STATUSES, googleSheetsConfigured:!!getGoogleSheetsUrl(), appName:APP_NAME, authEnabled:AUTH_ENABLED, idleTimeoutMs:IDLE_TIMEOUT_MS, idleTimeoutMinutes:IDLE_TIMEOUT_MINUTES});
   if (p === '/api/session/ping' && method === 'POST') return json(res, {ok:true, now:Date.now()});
 
   if (p === '/api/settings' && method === 'GET') {
@@ -498,7 +495,6 @@ const server = http.createServer(async (req,res) => {
       const reason = url.searchParams.get('reason');
       const messages = {
         idle:`Sesi berakhir karena tidak ada aktivitas selama ${IDLE_TIMEOUT_MINUTES} menit. Silakan masuk kembali.`,
-        max:`Sesi maksimum ${MAX_SESSION_HOURS} jam telah berakhir. Silakan masuk kembali.`,
         expired:'Sesi login sudah berakhir. Silakan masuk kembali.'
       };
       return text(res, loginPage(messages[reason] || ''), 200, 'text/html; charset=utf-8');
@@ -509,12 +505,12 @@ const server = http.createServer(async (req,res) => {
       const passOk = b.password === APP_PASSWORD;
       if (!userOk || !passOk) return text(res, loginPage('Username atau password salah.'), 401, 'text/html; charset=utf-8');
       const now = Date.now();
-      const session = {iat:now, idleExp:now + IDLE_TIMEOUT_MS, maxExp:now + MAX_SESSION_MS};
+      const session = {iat:now, idleExp:now + IDLE_TIMEOUT_MS};
       res.writeHead(302,{Location:'/', 'Set-Cookie':sessionCookie(req, session)}); return res.end();
     }
     if (url.pathname === '/logout') {
       const reason = url.searchParams.get('reason');
-      const target = ['idle','max','expired'].includes(reason) ? `/login?reason=${reason}` : '/login';
+      const target = ['idle','expired'].includes(reason) ? `/login?reason=${reason}` : '/login';
       res.writeHead(302,{Location:target,'Set-Cookie':`vom_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secureCookie(req)?'; Secure':''}`}); return res.end();
     }
 
