@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { initDb, db, nextOrderNo, getOrder, activeDbPath } from './db.js';
 import { makeXlsx } from './xlsx.js';
+import { LIFE_IS_FOOD_MASTER, LIFE_IS_FOOD_SOURCE } from './life-is-food-master.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = __dirname;
@@ -161,6 +162,142 @@ function getGoogleSheetsUrl() {
   return getSetting('google_sheets_webhook_url') || process.env.GOOGLE_SHEETS_WEBHOOK_URL || '';
 }
 
+function normalizeProductName(value='') {
+  return String(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function findLifeIsFoodSupplier() {
+  const suppliers = db.prepare('SELECT * FROM suppliers ORDER BY id').all();
+  return suppliers.find(s => String(s.name || '').toLowerCase().includes('life is food')) || null;
+}
+
+function ensureLifeIsFoodSupplier() {
+  const existing = findLifeIsFoodSupplier();
+  if (existing) return existing;
+
+  const r = db.prepare(`INSERT INTO suppliers(name,pic,whatsapp,address,category,notes)
+                        VALUES(?,?,?,?,?,?)`)
+    .run(
+      LIFE_IS_FOOD_SOURCE.supplierName,
+      '',
+      '',
+      '',
+      'Snack & Food',
+      `Master vendor ${LIFE_IS_FOOD_SOURCE.vendorCode} dari price list ${LIFE_IS_FOOD_SOURCE.priceListDate}`
+    );
+  return db.prepare('SELECT * FROM suppliers WHERE id=?').get(r.lastInsertRowid);
+}
+
+function syncLifeIsFoodMaster({force=false}={}) {
+  const markerKey = 'life_is_food_master_2026_v1';
+  if (!force && getSetting(markerKey) === 'done') {
+    const supplier = findLifeIsFoodSupplier();
+    const count = supplier
+      ? db.prepare('SELECT COUNT(*) c FROM products WHERE primary_supplier_id=?').get(supplier.id).c
+      : 0;
+    return {ok:true, skipped:true, supplier_id:supplier?.id || null, total_master:LIFE_IS_FOOD_MASTER.length, product_count:count};
+  }
+
+  const supplier = ensureLifeIsFoodSupplier();
+  const products = db.prepare('SELECT * FROM products ORDER BY id').all();
+  const bySku = new Map(products.filter(p => p.sku).map(p => [String(p.sku).trim().toUpperCase(), p]));
+  const byName = new Map();
+  for (const p of products) {
+    const key = normalizeProductName(p.name);
+    if (key && !byName.has(key)) byName.set(key, p);
+  }
+
+  const insert = db.prepare(`INSERT INTO products
+    (name,sku,primary_supplier_id,unit,last_price,purchase_price,active,notes)
+    VALUES(?,?,?,?,?,?,?,?)`);
+  const update = db.prepare(`UPDATE products
+    SET name=?,sku=?,primary_supplier_id=?,last_price=?,purchase_price=?,active=?,
+        notes=CASE WHEN notes IS NULL OR trim(notes)='' THEN ? ELSE notes END,
+        updated_at=CURRENT_TIMESTAMP
+    WHERE id=?`);
+
+  let inserted = 0;
+  let updated = 0;
+  let inactive = 0;
+  const sourceNote = `Master Life is Food 2026 · Vendor ${LIFE_IS_FOOD_SOURCE.vendorCode} · Price list ${LIFE_IS_FOOD_SOURCE.priceListDate}`;
+
+  for (const item of LIFE_IS_FOOD_MASTER) {
+    const skuKey = String(item.sku).trim().toUpperCase();
+    const nameKey = normalizeProductName(item.name);
+    let existing = bySku.get(skuKey) || byName.get(nameKey) || null;
+    const active = item.active === false ? 0 : 1;
+    if (!active) inactive += 1;
+
+    if (existing) {
+      update.run(
+        item.name,
+        item.sku,
+        supplier.id,
+        Number(item.price || 0),
+        Number(item.price || 0),
+        active,
+        sourceNote,
+        existing.id
+      );
+      updated += 1;
+      existing = {...existing, name:item.name, sku:item.sku, primary_supplier_id:supplier.id, last_price:item.price, purchase_price:item.price, active};
+      bySku.set(skuKey, existing);
+      byName.set(nameKey, existing);
+    } else {
+      const r = insert.run(
+        item.name,
+        item.sku,
+        supplier.id,
+        'pcs',
+        Number(item.price || 0),
+        Number(item.price || 0),
+        active,
+        sourceNote
+      );
+      const created = {
+        id:Number(r.lastInsertRowid),
+        name:item.name,
+        sku:item.sku,
+        primary_supplier_id:supplier.id,
+        unit:'pcs',
+        last_price:item.price,
+        purchase_price:item.price,
+        active
+      };
+      bySku.set(skuKey, created);
+      byName.set(nameKey, created);
+      inserted += 1;
+    }
+  }
+
+  setSetting(markerKey, 'done');
+  setSetting('life_is_food_master_last_sync', new Date().toISOString());
+
+  return {
+    ok:true,
+    skipped:false,
+    supplier_id:supplier.id,
+    supplier_name:supplier.name,
+    total_master:LIFE_IS_FOOD_MASTER.length,
+    active:LIFE_IS_FOOD_MASTER.filter(x => x.active !== false).length,
+    inactive,
+    inserted,
+    updated,
+    source_date:LIFE_IS_FOOD_SOURCE.priceListDate
+  };
+}
+
+try {
+  const result = syncLifeIsFoodMaster({force:false});
+  console.log('Life is Food master:', result);
+} catch (e) {
+  console.error('Life is Food master sync failed:', e);
+}
+
 function orderFilters(params) {
   const where = [];
   const values = [];
@@ -209,6 +346,34 @@ async function api(req, res, url) {
   if (p === '/api/health') return json(res, {ok:true, app:APP_NAME, db:activeDbPath});
   if (p === '/api/meta') return json(res, {statuses:STATUSES, googleSheetsConfigured:!!getGoogleSheetsUrl(), appName:APP_NAME, authEnabled:AUTH_ENABLED, idleTimeoutMs:IDLE_TIMEOUT_MS, idleTimeoutMinutes:IDLE_TIMEOUT_MINUTES});
   if (p === '/api/session/ping' && method === 'POST') return json(res, {ok:true, now:Date.now()});
+
+  if (p === '/api/master-data/life-is-food' && method === 'GET') {
+    const supplier = findLifeIsFoodSupplier();
+    const productCount = supplier
+      ? db.prepare('SELECT COUNT(*) c FROM products WHERE primary_supplier_id=?').get(supplier.id).c
+      : 0;
+    return json(res, {
+      supplier_id:supplier?.id || null,
+      supplier_name:supplier?.name || LIFE_IS_FOOD_SOURCE.supplierName,
+      vendor_code:LIFE_IS_FOOD_SOURCE.vendorCode,
+      source_date:LIFE_IS_FOOD_SOURCE.priceListDate,
+      total_master:LIFE_IS_FOOD_MASTER.length,
+      active_master:LIFE_IS_FOOD_MASTER.filter(x => x.active !== false).length,
+      product_count:productCount,
+      last_sync:getSetting('life_is_food_master_last_sync')
+    });
+  }
+
+  if (p === '/api/master-data/life-is-food' && method === 'POST') {
+    try {
+      return json(res, syncLifeIsFoodMaster({force:true}));
+    } catch (e) {
+      if (String(e.message || '').includes('UNIQUE constraint failed: products.sku')) {
+        return json(res,{error:'Sinkronisasi gagal karena ada SKU master yang sudah dipakai produk lain. Periksa SKU produk lalu coba lagi.'},409);
+      }
+      throw e;
+    }
+  }
 
   if (p === '/api/settings' && method === 'GET') {
     return json(res, {google_sheets_webhook_url:getGoogleSheetsUrl()});
@@ -297,9 +462,16 @@ async function api(req, res, url) {
   if (p === '/api/products' && method === 'POST') {
     const b = await parseBody(req);
     if (!b.name) return json(res,{error:'Nama produk wajib'},400);
-    const r = db.prepare('INSERT INTO products(name,sku,primary_supplier_id,unit,last_price,purchase_price,active,notes) VALUES(?,?,?,?,?,?,?,?)')
-      .run(b.name,b.sku||null,b.primary_supplier_id||null,b.unit||'pcs',Number(b.last_price||0),Number(b.purchase_price||0),b.active===false?0:1,b.notes||'');
-    return json(res,db.prepare('SELECT * FROM products WHERE id=?').get(r.lastInsertRowid),201);
+    try {
+      const r = db.prepare('INSERT INTO products(name,sku,primary_supplier_id,unit,last_price,purchase_price,active,notes) VALUES(?,?,?,?,?,?,?,?)')
+        .run(b.name,b.sku||null,b.primary_supplier_id||null,b.unit||'pcs',Number(b.last_price||0),Number(b.purchase_price||0),b.active===false?0:1,b.notes||'');
+      return json(res,db.prepare('SELECT * FROM products WHERE id=?').get(r.lastInsertRowid),201);
+    } catch (e) {
+      if (String(e.message || '').includes('UNIQUE constraint failed: products.sku')) {
+        return json(res,{error:`SKU "${b.sku}" sudah digunakan produk lain.`},409);
+      }
+      throw e;
+    }
   }
 
   m = p.match(/^\/api\/products\/(\d+)$/);
@@ -307,9 +479,16 @@ async function api(req, res, url) {
     const id = Number(m[1]);
     if (method === 'PUT') {
       const b = await parseBody(req);
-      db.prepare('UPDATE products SET name=?,sku=?,primary_supplier_id=?,unit=?,last_price=?,purchase_price=?,active=?,notes=?,updated_at=CURRENT_TIMESTAMP WHERE id=?')
-        .run(b.name,b.sku||null,b.primary_supplier_id||null,b.unit||'pcs',Number(b.last_price||0),Number(b.purchase_price||0),b.active===false?0:1,b.notes||'',id);
-      return json(res,db.prepare('SELECT * FROM products WHERE id=?').get(id));
+      try {
+        db.prepare('UPDATE products SET name=?,sku=?,primary_supplier_id=?,unit=?,last_price=?,purchase_price=?,active=?,notes=?,updated_at=CURRENT_TIMESTAMP WHERE id=?')
+          .run(b.name,b.sku||null,b.primary_supplier_id||null,b.unit||'pcs',Number(b.last_price||0),Number(b.purchase_price||0),b.active===false?0:1,b.notes||'',id);
+        return json(res,db.prepare('SELECT * FROM products WHERE id=?').get(id));
+      } catch (e) {
+        if (String(e.message || '').includes('UNIQUE constraint failed: products.sku')) {
+          return json(res,{error:`SKU "${b.sku}" sudah digunakan produk lain.`},409);
+        }
+        throw e;
+      }
     }
     if (method === 'DELETE') {
       db.prepare('DELETE FROM products WHERE id=?').run(id);

@@ -371,9 +371,17 @@ function orderForm() {
   const items = (o?.items || [{product_id:'',product_name:'',qty:1,unit:'pcs',price:0}]).map(x => ({...x}));
   const box = document.querySelector('#items');
 
+  function availableProducts(it) {
+    const supplierId = Number(document.querySelector('#supplier')?.value || o?.supplier_id || 0);
+    return state.products.filter(p =>
+      (p.active || Number(p.id)===Number(it.product_id)) &&
+      (!supplierId || Number(p.primary_supplier_id)===supplierId || Number(p.id)===Number(it.product_id))
+    );
+  }
+
   function draw() {
     box.innerHTML = items.map((it,i) => `<div class="item-editor" data-i="${i}">
-      <div class="field"><label>Produk</label><select class="prod"><option value="">Pilih produk</option>${state.products.filter(p => p.active || p.id===it.product_id).map(p => `<option value="${p.id}" ${Number(it.product_id)===p.id?'selected':''}>${escapeHtml(p.name)}</option>`).join('')}</select></div>
+      <div class="field"><label>Produk</label><select class="prod"><option value="">Pilih produk</option>${availableProducts(it).map(p => `<option value="${p.id}" ${Number(it.product_id)===p.id?'selected':''}>${escapeHtml(p.name)} — ${escapeHtml(rupiah(p.last_price || p.purchase_price || 0))}</option>`).join('')}</select></div>
       <div class="field"><label>Qty</label><input class="qty" type="number" min="0" step="1" value="${it.qty}"></div>
       <div class="field"><label>Satuan</label><input class="unit" value="${escapeHtml(it.unit)}"></div>
       <div class="field price"><label>Harga</label><input class="pricev" type="number" min="0" value="${it.price}"></div>
@@ -405,6 +413,19 @@ function orderForm() {
   }
 
   draw();
+  document.querySelector('#supplier').onchange = () => {
+    const supplierId = Number(document.querySelector('#supplier').value || 0);
+    for (const it of items) {
+      const p = state.products.find(x => Number(x.id)===Number(it.product_id));
+      if (p && supplierId && Number(p.primary_supplier_id)!==supplierId) {
+        it.product_id = '';
+        it.product_name = '';
+        it.price = 0;
+        it.unit = 'pcs';
+      }
+    }
+    draw();
+  };
   document.querySelector('#addItem').onclick = () => { items.push({product_id:'',product_name:'',qty:1,unit:'pcs',price:0}); draw(); };
   document.querySelector('#cancelOrder').onclick = () => route('orders');
   document.querySelector('#saveOrder').onclick = async () => {
@@ -480,11 +501,40 @@ function supplierModal(s={}) {
 }
 
 async function products() {
-  state.products = await api('/api/products');
+  const [productsData, lifeMaster] = await Promise.all([
+    api('/api/products'),
+    api('/api/master-data/life-is-food')
+  ]);
+  state.products = productsData;
   page('Products','Master produk, satuan, dan harga terakhir.', `
+    <div class="card" style="margin-bottom:14px">
+      <div class="row">
+        <div class="grow">
+          <b>Master Life is Food</b>
+          <div class="muted">${lifeMaster.product_count} produk terhubung · ${lifeMaster.active_master} aktif dari ${lifeMaster.total_master} material · Price list ${fmtDate(lifeMaster.source_date)}</div>
+        </div>
+        <button class="btn secondary" id="syncLifeMaster">Sync Price List</button>
+      </div>
+    </div>
     <div class="toolbar"><button class="btn" id="addProduct">+ Produk</button></div>
     <div class="list">${state.products.map(p => `<div class="card"><div class="row"><div class="grow"><b>${escapeHtml(p.name)}</b><div class="muted">${escapeHtml(p.sku||'-')} · ${escapeHtml(p.unit)} · ${rupiah(p.last_price)} · ${escapeHtml(p.supplier_name||'Tanpa supplier utama')} · ${p.active?'Aktif':'Nonaktif'}</div></div><button class="btn secondary edit-p" data-id="${p.id}">Edit</button></div></div>`).join('')}</div>
   `);
+  document.querySelector('#syncLifeMaster').onclick = async () => {
+    if (!confirm('Sync ulang master Life is Food? Harga produk master akan disesuaikan dengan price list 2026 yang sudah dimasukkan ke aplikasi.')) return;
+    const btn = document.querySelector('#syncLifeMaster');
+    btn.disabled = true;
+    btn.textContent = 'Sync...';
+    try {
+      const r = await api('/api/master-data/life-is-food',{method:'POST'});
+      [state.suppliers,state.products] = await Promise.all([api('/api/suppliers'),api('/api/products')]);
+      toast(`Master Life is Food tersinkron: ${r.inserted} baru, ${r.updated} diperbarui`);
+      route('products');
+    } catch (e) {
+      alert(e.message);
+      btn.disabled = false;
+      btn.textContent = 'Sync Price List';
+    }
+  };
   document.querySelector('#addProduct').onclick = () => productModal();
   document.querySelectorAll('.edit-p').forEach(b => b.onclick = () => productModal(state.products.find(p => p.id===Number(b.dataset.id))));
 }
@@ -522,7 +572,19 @@ function formModal(title,body,onSave) {
   modal.innerHTML = `<div class="modal-box"><div class="row"><h2 class="grow">${escapeHtml(title)}</h2><button class="btn secondary close">Tutup</button></div>${body}<div class="toolbar section"><button class="btn save">Simpan</button></div></div>`;
   document.body.appendChild(modal);
   modal.querySelector('.close').onclick = () => modal.remove();
-  modal.querySelector('.save').onclick = () => onSave(modal);
+  modal.querySelector('.save').onclick = async () => {
+    const btn = modal.querySelector('.save');
+    btn.disabled = true;
+    const oldText = btn.textContent;
+    btn.textContent = 'Menyimpan...';
+    try {
+      await onSave(modal);
+    } catch (e) {
+      alert(e.message);
+      btn.disabled = false;
+      btn.textContent = oldText;
+    }
+  };
 }
 
 async function reports() {
