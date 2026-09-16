@@ -368,7 +368,7 @@ function orderForm() {
     <div class="toolbar section"><button class="btn" id="saveOrder">${o?'Update Order':'Generate Order'}</button><button class="btn secondary" id="cancelOrder">Batal</button></div>
   `);
 
-  const items = (o?.items || [{product_id:'',product_name:'',qty:1,unit:'pcs',price:0}]).map(x => ({...x}));
+  const items = (o?.items || [{product_id:'',product_name:'',qty:1,unit:'pcs',price:0}]).map(x => ({...x, search_text:x.product_name || ''}));
   const box = document.querySelector('#items');
 
   function availableProducts(it) {
@@ -379,9 +379,47 @@ function orderForm() {
     );
   }
 
+  function productMatches(it, query) {
+    const q = String(query || '').trim().toLowerCase();
+    const products = availableProducts(it);
+    if (!q) return products.slice(0, 10);
+    return products
+      .filter(p => `${p.name} ${p.sku || ''}`.toLowerCase().includes(q))
+      .slice(0, 10);
+  }
+
+  function drawSuggestions(el, i, query) {
+    const panel = el.querySelector('.product-suggestions');
+    const matches = productMatches(items[i], query);
+    if (!matches.length) {
+      panel.innerHTML = '<div class="product-empty">Produk tidak ditemukan</div>';
+    } else {
+      panel.innerHTML = matches.map(p => `<button type="button" class="product-option" data-product-id="${p.id}">
+        <span><b>${escapeHtml(p.name)}</b>${p.sku ? `<small>${escapeHtml(p.sku)}</small>` : ''}</span>
+        <strong>${escapeHtml(rupiah(p.last_price || p.purchase_price || 0))}</strong>
+      </button>`).join('');
+    }
+    panel.classList.add('show');
+    panel.querySelectorAll('.product-option').forEach(btn => {
+      btn.onclick = () => {
+        const p = state.products.find(x => Number(x.id) === Number(btn.dataset.productId));
+        if (!p) return;
+        items[i].product_id = p.id;
+        items[i].product_name = p.name;
+        items[i].search_text = p.name;
+        items[i].unit = p.unit || 'pcs';
+        items[i].price = p.last_price || p.purchase_price || 0;
+        draw();
+      };
+    });
+  }
+
   function draw() {
     box.innerHTML = items.map((it,i) => `<div class="item-editor" data-i="${i}">
-      <div class="field"><label>Produk</label><select class="prod"><option value="">Pilih produk</option>${availableProducts(it).map(p => `<option value="${p.id}" ${Number(it.product_id)===p.id?'selected':''}>${escapeHtml(p.name)} — ${escapeHtml(rupiah(p.last_price || p.purchase_price || 0))}</option>`).join('')}</select></div>
+      <div class="field product-field"><label>Produk</label><div class="product-search-wrap">
+        <input class="prod-search" autocomplete="off" placeholder="Ketik nama / SKU produk..." value="${escapeHtml(it.search_text ?? it.product_name ?? '')}">
+        <div class="product-suggestions"></div>
+      </div></div>
       <div class="field"><label>Qty</label><input class="qty" type="number" min="0" step="1" value="${it.qty}"></div>
       <div class="field"><label>Satuan</label><input class="unit" value="${escapeHtml(it.unit)}"></div>
       <div class="field price"><label>Harga</label><input class="pricev" type="number" min="0" value="${it.price}"></div>
@@ -390,16 +428,43 @@ function orderForm() {
 
     box.querySelectorAll('.item-editor').forEach(el => {
       const i = Number(el.dataset.i);
-      el.querySelector('.prod').onchange = e => {
-        const p = state.products.find(x => x.id === Number(e.target.value));
-        if (p) {
-          items[i].product_id = p.id;
-          items[i].product_name = p.name;
-          items[i].unit = p.unit;
-          items[i].price = p.last_price || p.purchase_price || 0;
-          draw();
+      const search = el.querySelector('.prod-search');
+      const panel = el.querySelector('.product-suggestions');
+
+      search.onfocus = () => drawSuggestions(el, i, search.value);
+      search.oninput = e => {
+        const typed = e.target.value;
+        items[i].search_text = typed;
+        if (typed !== items[i].product_name) {
+          items[i].product_id = '';
+          items[i].product_name = '';
         }
+        drawSuggestions(el, i, typed);
       };
+      search.onkeydown = e => {
+        const options = [...panel.querySelectorAll('.product-option')];
+        if (!options.length) return;
+        let idx = options.findIndex(x => x.classList.contains('active'));
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          idx = Math.min(idx + 1, options.length - 1);
+        } else if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          idx = Math.max(idx - 1, 0);
+        } else if (e.key === 'Enter') {
+          const target = idx >= 0 ? options[idx] : options[0];
+          if (target) { e.preventDefault(); target.click(); }
+          return;
+        } else if (e.key === 'Escape') {
+          panel.classList.remove('show');
+          return;
+        } else return;
+        options.forEach(x => x.classList.remove('active'));
+        options[idx]?.classList.add('active');
+        options[idx]?.scrollIntoView({block:'nearest'});
+      };
+      search.onblur = () => setTimeout(() => panel.classList.remove('show'), 150);
+
       el.querySelector('.qty').oninput = e => { items[i].qty = Number(e.target.value); sum(); };
       el.querySelector('.unit').oninput = e => items[i].unit = e.target.value;
       el.querySelector('.pricev').oninput = e => { items[i].price = Number(e.target.value); sum(); };
@@ -426,7 +491,7 @@ function orderForm() {
     }
     draw();
   };
-  document.querySelector('#addItem').onclick = () => { items.push({product_id:'',product_name:'',qty:1,unit:'pcs',price:0}); draw(); };
+  document.querySelector('#addItem').onclick = () => { items.push({product_id:'',product_name:'',search_text:'',qty:1,unit:'pcs',price:0}); draw(); setTimeout(() => box.lastElementChild?.querySelector('.prod-search')?.focus(), 0); };
   document.querySelector('#cancelOrder').onclick = () => route('orders');
   document.querySelector('#saveOrder').onclick = async () => {
     try {
@@ -435,7 +500,7 @@ function orderForm() {
         order_date:document.querySelector('#orderDate').value,
         status:document.querySelector('#status').value,
         notes:document.querySelector('#notes').value,
-        items:items.filter(i => i.product_name && i.qty > 0)
+        items:items.filter(i => i.product_id && i.product_name && i.qty > 0)
       };
       const result = o
         ? await api(`/api/orders/${o.id}`,{method:'PUT',body:JSON.stringify(payload)})
