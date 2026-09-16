@@ -381,18 +381,38 @@ function orderForm() {
 
   function productMatches(it, query) {
     const q = String(query || '').trim().toLowerCase();
+    if (!q) return [];
     const products = availableProducts(it);
-    if (!q) return products.slice(0, 10);
     return products
-      .filter(p => `${p.name} ${p.sku || ''}`.toLowerCase().includes(q))
-      .slice(0, 10);
+      .map(p => {
+        const name = String(p.name || '').toLowerCase();
+        const sku = String(p.sku || '').toLowerCase();
+        let score = 9;
+        if (name === q || sku === q) score = 0;
+        else if (name.startsWith(q)) score = 1;
+        else if (sku.startsWith(q)) score = 2;
+        else if (name.split(/\s+/).some(w => w.startsWith(q))) score = 3;
+        else if (name.includes(q)) score = 4;
+        else if (sku.includes(q)) score = 5;
+        return {p, score};
+      })
+      .filter(x => x.score < 9)
+      .sort((a,b) => a.score - b.score || a.p.name.localeCompare(b.p.name, 'id'))
+      .slice(0, 8)
+      .map(x => x.p);
   }
 
   function drawSuggestions(el, i, query) {
     const panel = el.querySelector('.product-suggestions');
-    const matches = productMatches(items[i], query);
+    const q = String(query || '').trim();
+    if (!q) {
+      panel.innerHTML = '<div class="product-empty">Ketik nama produk atau SKU untuk mencari.</div>';
+      panel.classList.add('show');
+      return;
+    }
+    const matches = productMatches(items[i], q);
     if (!matches.length) {
-      panel.innerHTML = '<div class="product-empty">Produk tidak ditemukan</div>';
+      panel.innerHTML = `<div class="product-empty">Tidak ada produk yang cocok dengan <b>${escapeHtml(q)}</b>.</div>`;
     } else {
       panel.innerHTML = matches.map(p => `<button type="button" class="product-option" data-product-id="${p.id}">
         <span><b>${escapeHtml(p.name)}</b>${p.sku ? `<small>${escapeHtml(p.sku)}</small>` : ''}</span>
@@ -417,7 +437,7 @@ function orderForm() {
   function draw() {
     box.innerHTML = items.map((it,i) => `<div class="item-editor" data-i="${i}">
       <div class="field product-field"><label>Produk</label><div class="product-search-wrap">
-        <input class="prod-search" autocomplete="off" placeholder="Ketik nama / SKU produk..." value="${escapeHtml(it.search_text ?? it.product_name ?? '')}">
+        <input class="prod-search" autocomplete="off" placeholder="Cari produk..." value="${escapeHtml(it.search_text ?? it.product_name ?? '')}">
         <div class="product-suggestions"></div>
       </div></div>
       <div class="field"><label>Qty</label><input class="qty" type="number" min="0" step="1" value="${it.qty}"></div>
@@ -724,7 +744,7 @@ document.querySelector('#installBtn').onclick = async () => {
 };
 
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js').then(reg => reg.update()).catch(() => {});
+  navigator.serviceWorker.register('/sw.js?v=1.7.0').then(reg => reg.update()).catch(() => {});
 }
 
 bootstrap().catch(e => {
