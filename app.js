@@ -177,7 +177,12 @@ async function render() {
 
 async function dashboard() {
   const d = await api('/api/dashboard');
-  page('Dashboard', `Ringkasan order ${fmtDate(d.date)}`, `
+  const actions = [...(d.actions || [])].sort((a,b) => String(a.order_date).localeCompare(String(b.order_date)) || String(a.order_no).localeCompare(String(b.order_no)));
+  const todayActions = actions.filter(o => o.order_date === d.date);
+  const overdueActions = actions.filter(o => o.order_date < d.date);
+  const upcomingActions = actions.filter(o => o.order_date > d.date);
+
+  page('Dashboard', `Ringkasan order hari ini · ${fmtDate(d.date)}`, `
     <div class="grid stats">
       ${stat('Total Order',d.total,'orders')}
       ${stat('Draft',d.draft,'orders?status=Draft')}
@@ -186,13 +191,44 @@ async function dashboard() {
       ${stat('Menunggu Konfirmasi',d.waiting,'orders?status=Sent')}
       ${stat('Completed',d.completed,'orders?status=Completed')}
     </div>
-    <div class="section">
-      <div class="row">
-        <h2 class="grow">Butuh Tindakan</h2>
+
+    <div class="section dashboard-monitor">
+      <div class="row dashboard-monitor-title">
+        <div class="grow">
+          <h2>Monitoring Order</h2>
+          <div class="muted">Order dipisahkan berdasarkan tanggal agar lebih mudah dibaca.</div>
+        </div>
         <button class="btn" id="newOrder">+ Order</button>
       </div>
-      <div class="list">${d.actions.length ? d.actions.map(orderCard).join('') : '<div class="card empty">Tidak ada order yang membutuhkan tindakan.</div>'}</div>
+
+      ${dashboardOrderGroup(
+        'Hari Ini',
+        `${fmtDate(d.date)} · ${todayActions.length ? 'Perlu dicek hari ini' : 'Belum ada order yang perlu ditindaklanjuti hari ini'}`,
+        todayActions,
+        'today',
+        d.date,
+        'Tidak ada order hari ini yang membutuhkan tindakan.'
+      )}
+
+      ${overdueActions.length ? dashboardOrderGroup(
+        'Lewat Tanggal',
+        'Order tanggal sebelumnya yang belum selesai.',
+        overdueActions,
+        'overdue',
+        d.date,
+        ''
+      ) : ''}
+
+      ${dashboardOrderGroup(
+        'Order Mendatang',
+        upcomingActions.length ? 'Order untuk tanggal berikutnya. Tetap ditampilkan agar persiapan tidak terlewat.' : 'Belum ada order mendatang yang membutuhkan tindakan.',
+        upcomingActions,
+        'upcoming',
+        d.date,
+        'Belum ada order mendatang yang membutuhkan tindakan.'
+      )}
     </div>
+
     <div class="toolbar section">
       <button class="btn secondary" id="toReports">Reports & Export</button>
       <button class="btn secondary" id="quickExport">Export Excel</button>
@@ -208,10 +244,41 @@ function stat(t,n,target) {
   return `<div class="card stat kpi-link" data-target="${target}"><small>${escapeHtml(t)}</small><b>${n}</b></div>`;
 }
 
-function orderCard(o) {
-  return `<div class="card order-card" data-order="${o.id}">
+function dateDistanceLabel(orderDate, baseDate) {
+  if (!orderDate || !baseDate) return '';
+  const a = new Date(`${baseDate}T00:00:00Z`);
+  const b = new Date(`${orderDate}T00:00:00Z`);
+  const days = Math.round((b - a) / 86400000);
+  if (days === 0) return 'Hari ini';
+  if (days === 1) return 'Besok';
+  if (days > 1) return `${days} hari lagi`;
+  if (days === -1) return 'Lewat 1 hari';
+  return `Lewat ${Math.abs(days)} hari`;
+}
+
+function dashboardOrderGroup(title, subtitle, orders, kind, baseDate, emptyText) {
+  return `<section class="dashboard-order-group ${kind}">
+    <div class="dashboard-group-head">
+      <div class="grow">
+        <div class="dashboard-group-title">${escapeHtml(title)} <span class="count-pill">${orders.length}</span></div>
+        <div class="muted">${escapeHtml(subtitle)}</div>
+      </div>
+    </div>
+    <div class="list">${orders.length
+      ? orders.map(o => orderCard(o, dateDistanceLabel(o.order_date, baseDate), kind)).join('')
+      : `<div class="card dashboard-empty">${escapeHtml(emptyText)}</div>`}
+    </div>
+  </section>`;
+}
+
+function orderCard(o, dateLabel='', kind='') {
+  const dateTag = dateLabel ? `<span class="date-tag ${kind}">${escapeHtml(dateLabel)}</span>` : '';
+  return `<div class="card order-card dashboard-order-card ${kind}" data-order="${o.id}">
     <div class="head">
-      <div><b>${escapeHtml(o.order_no)}</b><div class="muted">${escapeHtml(o.supplier_name)} · ${fmtDate(o.order_date)}</div></div>
+      <div>
+        <b>${escapeHtml(o.order_no)}</b>
+        <div class="muted order-meta">${escapeHtml(o.supplier_name)} · ${fmtDate(o.order_date)} ${dateTag}</div>
+      </div>
       ${badge(o.status)}
     </div>
     <div class="row">
@@ -420,16 +487,30 @@ function orderForm() {
       </button>`).join('');
     }
     panel.classList.add('show');
+
+    const chooseProduct = productId => {
+      const p = state.products.find(x => Number(x.id) === Number(productId));
+      if (!p) return;
+      items[i].product_id = p.id;
+      items[i].product_name = p.name;
+      items[i].search_text = p.name;
+      items[i].unit = p.unit || 'pcs';
+      items[i].price = p.last_price || p.purchase_price || 0;
+      draw();
+    };
+
+    // Pilih dengan mouse/touch. pointerdown dipakai agar pilihan terjadi
+    // sebelum input kehilangan fokus dan panel autocomplete ditutup.
     panel.querySelectorAll('.product-option').forEach(btn => {
-      btn.onclick = () => {
-        const p = state.products.find(x => Number(x.id) === Number(btn.dataset.productId));
-        if (!p) return;
-        items[i].product_id = p.id;
-        items[i].product_name = p.name;
-        items[i].search_text = p.name;
-        items[i].unit = p.unit || 'pcs';
-        items[i].price = p.last_price || p.purchase_price || 0;
-        draw();
+      btn.onpointerdown = e => {
+        e.preventDefault();
+        e.stopPropagation();
+        chooseProduct(btn.dataset.productId);
+      };
+      // Fallback untuk browser yang hanya memicu click.
+      btn.onclick = e => {
+        e.preventDefault();
+        chooseProduct(btn.dataset.productId);
       };
     });
   }
@@ -473,7 +554,18 @@ function orderForm() {
           idx = Math.max(idx - 1, 0);
         } else if (e.key === 'Enter') {
           const target = idx >= 0 ? options[idx] : options[0];
-          if (target) { e.preventDefault(); target.click(); }
+          if (target) {
+            e.preventDefault();
+            const p = state.products.find(x => Number(x.id) === Number(target.dataset.productId));
+            if (p) {
+              items[i].product_id = p.id;
+              items[i].product_name = p.name;
+              items[i].search_text = p.name;
+              items[i].unit = p.unit || 'pcs';
+              items[i].price = p.last_price || p.purchase_price || 0;
+              draw();
+            }
+          }
           return;
         } else if (e.key === 'Escape') {
           panel.classList.remove('show');

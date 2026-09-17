@@ -1,5 +1,5 @@
-const CACHE='vendor-order-unsinn-v9';
-const ASSETS=['/','/styles.css?v=1.8.0','/app.js?v=1.8.0','/manifest.webmanifest','/icon.svg'];
+const CACHE='vendor-order-unsinn-v11';
+const ASSETS=['/','/styles.css?v=2.0.0','/app.js?v=2.0.0','/manifest.webmanifest','/icon.svg'];
 self.addEventListener('install',e=>{self.skipWaiting();e.waitUntil(caches.open(CACHE).then(c=>c.addAll(ASSETS)))});
 self.addEventListener('activate',e=>e.waitUntil(Promise.all([caches.keys().then(keys=>Promise.all(keys.filter(k=>k!==CACHE).map(k=>caches.delete(k)))),self.clients.claim()])));
 self.addEventListener('fetch',e=>{
